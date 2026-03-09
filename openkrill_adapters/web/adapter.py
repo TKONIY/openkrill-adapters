@@ -39,13 +39,19 @@ class WebAdapter(BaseAdapter):
         )
         self._response_timeout: int = config.get("response_timeout", 120)
 
-        # Cookies can be a JSON string or list of dicts
+        # Cookies: list of dicts, JSON string, or file path
         raw_cookies = config.get("cookies", [])
         if isinstance(raw_cookies, str) and raw_cookies.strip():
             import json
+            from pathlib import Path
 
+            cookie_str = raw_cookies.strip()
+            # Check if it's a file path (e.g. ~/.openkrill/cookies/gemini.json)
+            cookie_path = Path(cookie_str).expanduser()
+            if cookie_path.is_file():
+                cookie_str = cookie_path.read_text()
             try:
-                raw_cookies = json.loads(raw_cookies)
+                raw_cookies = json.loads(cookie_str)
             except json.JSONDecodeError:
                 logger.warning("Invalid cookies JSON, ignoring")
                 raw_cookies = []
