@@ -239,6 +239,36 @@ async def handle_session_interrupt(
     logger.info("Session interrupt for agent %s: %s", agent_id, interrupted)
 
 
+async def handle_session_query(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    agent_id: str,
+    session_manager: SessionManager | None,
+) -> None:
+    """Handle a session status query — report current session info."""
+    request_id = data.get("request_id", "")
+
+    session = None
+    if session_manager:
+        sid = session_manager.get_session_id(agent_id)
+        has_active_proc = bool(sid and sid in session_manager._active_procs)
+        session = {
+            "session_id": sid or "",
+            "active": sid is not None,
+            "processing": has_active_proc,
+        }
+
+    await ws.send(
+        json.dumps(
+            {
+                "type": "bridge.session.info",
+                "request_id": request_id,
+                "session": session,
+            }
+        )
+    )
+
+
 async def run_bridge(
     server_url: str,
     token: str,
@@ -295,6 +325,10 @@ async def run_bridge(
                             asyncio.create_task(
                                 handle_session_interrupt(ws, data, session_manager)
                             )
+                        elif msg_type == "bridge.session.query":
+                            asyncio.create_task(
+                                handle_session_query(ws, data, agent_id, session_manager)
+                            )
                         elif msg_type == "pong":
                             pass
                         else:
@@ -317,8 +351,16 @@ def main() -> None:
     )
     parser.add_argument("--agent-id", required=True, help="Agent UUID to serve")
     parser.add_argument("--command", default="claude", help="CLI command (default: claude)")
-    parser.add_argument("--args", default="-p", help="CLI args, use = syntax for dash args: --args=\"-p\" (default: -p)")
-    parser.add_argument("--session-mode", action="store_true", help="Enable session management and streaming")
+    parser.add_argument(
+        "--args",
+        default="-p",
+        help='CLI args, use = syntax for dash args: --args="-p" (default: -p)',
+    )
+    parser.add_argument(
+        "--session-mode",
+        action="store_true",
+        help="Enable session management and streaming",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
