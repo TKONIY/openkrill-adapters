@@ -35,6 +35,17 @@ class SiteDriver(ABC):
     async def wait_for_response(self, page: Page, timeout_ms: int = 120_000) -> str:
         """Wait for the AI response to finish streaming, return full text."""
 
+    async def _find_element(self, page: Page, selectors: list[str], timeout: int = 5000):
+        """Try multiple selectors, return the first match. Raises if none found."""
+        for selector in selectors:
+            try:
+                el = page.locator(selector)
+                await el.wait_for(timeout=timeout)
+                return el
+            except Exception:
+                continue
+        raise RuntimeError(f"Could not find element with any selector: {selectors}")
+
     async def start_new_chat(self, page: Page) -> None:
         """Navigate to a fresh conversation. Override if site supports it."""
         await page.goto(self.base_url, wait_until="domcontentloaded")

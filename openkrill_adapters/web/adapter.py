@@ -8,8 +8,10 @@ Config schema:
     response_timeout: int — Max seconds to wait for AI response (default: 120)
 """
 
+import json
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
@@ -40,23 +42,10 @@ class WebAdapter(BaseAdapter):
         )
         self._response_timeout: int = config.get("response_timeout", 120)
 
-        # Cookies: list of dicts, JSON string, or file path
-        raw_cookies = config.get("cookies", [])
-        if isinstance(raw_cookies, str) and raw_cookies.strip():
-            import json
-            from pathlib import Path
-
-            cookie_str = raw_cookies.strip()
-            # Check if it's a file path (e.g. ~/.openkrill/cookies/gemini.json)
-            cookie_path = Path(cookie_str).expanduser()
-            if cookie_path.is_file():
-                cookie_str = cookie_path.read_text()
-            try:
-                raw_cookies = json.loads(cookie_str)
-            except json.JSONDecodeError:
-                logger.warning("Invalid cookies JSON, ignoring")
-                raw_cookies = []
-        self._cookies: list[dict] = raw_cookies if isinstance(raw_cookies, list) else []
+        # Store original cookie config value for re-reading on reconnect
+        self._cookie_source = config.get("cookies", [])
+        self._cookies: list[dict] = []
+        self._load_cookies()
 
         self._playwright = None
         self._browser: Browser | None = None
@@ -72,8 +61,27 @@ class WebAdapter(BaseAdapter):
     def max_capability(self) -> AdapterCapability:
         return AdapterCapability.L0_TEXT
 
+    def _load_cookies(self) -> None:
+        """Parse cookies from the original config value (list, JSON string, or file path)."""
+        raw_cookies = self._cookie_source
+        if isinstance(raw_cookies, str) and raw_cookies.strip():
+            cookie_str = raw_cookies.strip()
+            # Check if it's a file path (e.g. ~/.openkrill/cookies/gemini.json)
+            cookie_path = Path(cookie_str).expanduser()
+            if cookie_path.is_file():
+                cookie_str = cookie_path.read_text()
+            try:
+                raw_cookies = json.loads(cookie_str)
+            except json.JSONDecodeError:
+                logger.warning("Invalid cookies JSON, ignoring")
+                raw_cookies = []
+        self._cookies = raw_cookies if isinstance(raw_cookies, list) else []
+
     async def connect(self) -> None:
         """Launch browser, restore cookies, navigate to site."""
+        # Re-read cookies in case the file was updated (e.g. login helper re-ran)
+        self._load_cookies()
+
         driver_class = SiteDriverRegistry.get(self._site_name)
         self._driver = driver_class()
 
