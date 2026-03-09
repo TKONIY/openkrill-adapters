@@ -19,6 +19,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
 [project.entry-points."openkrill.adapters"]
 api = "openkrill_adapters.api:ApiAdapter"
 cli = "openkrill_adapters.cli:CliAdapter"
+web = "openkrill_adapters.web:WebAdapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openkrill_adapters"]

@@ -181,7 +181,7 @@ def main() -> None:
     )
     parser.add_argument("--agent-id", required=True, help="Agent UUID to serve")
     parser.add_argument("--command", default="claude", help="CLI command (default: claude)")
-    parser.add_argument("--args", default="-p", help="CLI args (default: -p)")
+    parser.add_argument("--args", default="-p", help="CLI args, use = syntax for dash args: --args=\"-p\" (default: -p)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
