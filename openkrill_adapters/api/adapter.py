@@ -15,6 +15,7 @@ from openkrill_adapters.base import (
     AdapterResponse,
     BaseAdapter,
     StreamChunk,
+    UsageInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,22 @@ class ApiAdapter(BaseAdapter):
                     elif event.delta.type == "text_delta":
                         yield StreamChunk(type="text", content=event.delta.text)
 
+            # Yield usage info from the final message
+            try:
+                final = await stream.get_final_message()
+                if final and final.usage:
+                    yield StreamChunk(
+                        type="usage",
+                        usage=UsageInfo(
+                            input_tokens=final.usage.input_tokens,
+                            output_tokens=final.usage.output_tokens,
+                            model=final.model,
+                            provider="anthropic",
+                        ),
+                    )
+            except Exception:
+                logger.debug("Could not extract usage info from Anthropic stream")
+
     # ── OpenAI ──
 
     def _to_openai_messages(self, messages: list[AdapterMessage]) -> list[dict]:
@@ -167,8 +184,21 @@ class ApiAdapter(BaseAdapter):
             model=self._model,
             messages=self._to_openai_messages(messages),
             stream=True,
+            stream_options={"include_usage": True},
         )
         async for chunk in stream:
+            # Final chunk with usage info (no choices)
+            if hasattr(chunk, "usage") and chunk.usage and not chunk.choices:
+                yield StreamChunk(
+                    type="usage",
+                    usage=UsageInfo(
+                        input_tokens=chunk.usage.prompt_tokens or 0,
+                        output_tokens=chunk.usage.completion_tokens or 0,
+                        model=chunk.model or self._model,
+                        provider="openai",
+                    ),
+                )
+                continue
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta

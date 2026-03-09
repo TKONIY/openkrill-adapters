@@ -49,14 +49,27 @@ class AdapterResponse:
 
 
 @dataclass
+class UsageInfo:
+    """Token usage information from an API call."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = ""
+    provider: str = ""
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
 class StreamChunk:
     """A single chunk in a streaming response.
 
-    type: "thinking" for CoT/reasoning tokens, "text" for final response.
+    type: "thinking" for CoT/reasoning tokens, "text" for final response,
+          "usage" for token usage info (yielded last).
     """
 
-    type: str  # "thinking" or "text"
-    content: str
+    type: str  # "thinking", "text", or "usage"
+    content: str = ""
+    usage: UsageInfo | None = None
 
 
 class BaseAdapter(ABC):

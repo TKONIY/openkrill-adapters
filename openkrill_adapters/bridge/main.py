@@ -42,7 +42,8 @@ async def handle_request(
     request_id = data.get("request_id", "")
     messages = data.get("messages", [])
 
-    # Get the last user message as input
+    # Extract system context and user message
+    system_parts = [m.get("content", "") for m in messages if m.get("role") == "system"]
     user_messages = [m for m in messages if m.get("role") == "user"]
     if not user_messages:
         await ws.send(
@@ -57,6 +58,10 @@ async def handle_request(
         return
 
     prompt = user_messages[-1].get("content", "")
+    # Prepend system context (group chat info, etc.) to the prompt
+    if system_parts:
+        system_context = "\n\n".join(system_parts)
+        prompt = f"[System Context]\n{system_context}\n\n[User Message]\n{prompt}"
 
     # Build command — use "--" to prevent prompt being parsed as flags
     cmd_parts = [command] + args.split() + ["--", prompt]
@@ -132,9 +137,14 @@ async def handle_session_send(
 
     # Support both direct prompt and messages-based input
     if not prompt and messages:
+        system_parts = [m.get("content", "") for m in messages if m.get("role") == "system"]
         user_messages = [m for m in messages if m.get("role") == "user"]
         if user_messages:
             prompt = user_messages[-1].get("content", "")
+            # Prepend system context (group chat info, etc.) to the prompt
+            if system_parts:
+                system_context = "\n\n".join(system_parts)
+                prompt = f"[System Context]\n{system_context}\n\n[User Message]\n{prompt}"
 
     if not prompt:
         await ws.send(

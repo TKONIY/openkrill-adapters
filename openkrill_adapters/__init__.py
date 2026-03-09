@@ -9,6 +9,7 @@ from openkrill_adapters.base import (
     AdapterResponse,
     BaseAdapter,
     StreamChunk,
+    UsageInfo,
 )
 from openkrill_adapters.cli.session_adapter import SessionCliAdapter
 from openkrill_adapters.registry import AdapterRegistry
@@ -21,4 +22,5 @@ __all__ = [
     "BaseAdapter",
     "SessionCliAdapter",
     "StreamChunk",
+    "UsageInfo",
 ]
