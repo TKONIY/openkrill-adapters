@@ -30,12 +30,12 @@ class GeminiDriver(SiteDriver):
     SEND_SELECTORS = [
         'button[aria-label="Send message"]',
         'button[aria-label="Send"]',
-        'button.send-button',
+        "button.send-button",
     ]
     LOADING_SELECTORS = [
         ".loading-indicator",
         ".response-streaming",
-        'mat-progress-bar',
+        "mat-progress-bar",
     ]
     RESPONSE_SELECTORS = [
         "message-content",

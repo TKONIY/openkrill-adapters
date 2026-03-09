@@ -31,9 +31,7 @@ import sys
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Connect this Claude Code session to OpenKrill"
-    )
+    parser = argparse.ArgumentParser(description="Connect this Claude Code session to OpenKrill")
     subparsers = parser.add_subparsers(dest="action")
 
     connect_parser = subparsers.add_parser("connect", help="Start bridge daemon in session mode")

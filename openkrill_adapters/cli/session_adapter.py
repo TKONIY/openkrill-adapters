@@ -37,12 +37,8 @@ class SessionCliAdapter(BaseAdapter):
     def __init__(self, config: dict) -> None:
         super().__init__(config)
         self._agent_id = config.get("agent_id", "")
-        self._bridge_stream_send: BridgeStreamSendFn | None = config.get(
-            "_bridge_stream_send"
-        )
-        self._bridge_interrupt: BridgeInterruptFn | None = config.get(
-            "_bridge_interrupt"
-        )
+        self._bridge_stream_send: BridgeStreamSendFn | None = config.get("_bridge_stream_send")
+        self._bridge_interrupt: BridgeInterruptFn | None = config.get("_bridge_interrupt")
 
     async def connect(self) -> None:
         if not self._bridge_stream_send:
@@ -62,21 +58,16 @@ class SessionCliAdapter(BaseAdapter):
                 parts.append(chunk.content)
         return AdapterResponse(content="".join(parts))
 
-    async def send_stream(
-        self, messages: list[AdapterMessage]
-    ) -> AsyncIterator[StreamChunk]:
+    async def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         """Stream response from persistent Claude Code session."""
         if not self._bridge_stream_send:
             raise RuntimeError("No bridge connected")
 
         msg_dicts = [
-            {"role": m.role, "content": m.content, "content_type": m.content_type}
-            for m in messages
+            {"role": m.role, "content": m.content, "content_type": m.content_type} for m in messages
         ]
 
-        queue: asyncio.Queue = await self._bridge_stream_send(
-            self._agent_id, msg_dicts
-        )
+        queue: asyncio.Queue = await self._bridge_stream_send(self._agent_id, msg_dicts)
 
         while True:
             item = await asyncio.wait_for(queue.get(), timeout=300)

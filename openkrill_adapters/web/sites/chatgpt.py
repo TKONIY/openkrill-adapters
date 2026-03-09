@@ -38,8 +38,8 @@ class ChatGPTDriver(SiteDriver):
     ]
     RESPONSE_SELECTORS = [
         '[data-message-author-role="assistant"]',
-        'div.agent-turn',
-        'div.markdown',
+        "div.agent-turn",
+        "div.markdown",
     ]
 
     @property

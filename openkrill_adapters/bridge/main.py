@@ -314,17 +314,11 @@ async def run_bridge(
 
                         if msg_type == "bridge.request":
                             # Handle in background to allow concurrent requests
-                            asyncio.create_task(
-                                handle_request(ws, data, command, args)
-                            )
+                            asyncio.create_task(handle_request(ws, data, command, args))
                         elif msg_type == "bridge.session.send" and session_manager:
-                            asyncio.create_task(
-                                handle_session_send(ws, data, session_manager)
-                            )
+                            asyncio.create_task(handle_session_send(ws, data, session_manager))
                         elif msg_type == "bridge.session.interrupt" and session_manager:
-                            asyncio.create_task(
-                                handle_session_interrupt(ws, data, session_manager)
-                            )
+                            asyncio.create_task(handle_session_interrupt(ws, data, session_manager))
                         elif msg_type == "bridge.session.query":
                             asyncio.create_task(
                                 handle_session_query(ws, data, agent_id, session_manager)

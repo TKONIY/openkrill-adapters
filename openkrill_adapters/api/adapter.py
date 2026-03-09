@@ -81,19 +81,37 @@ class ApiAdapter(BaseAdapter):
 
     # ── Anthropic ──
 
-    def _to_anthropic_messages(self, messages: list[AdapterMessage]) -> list[dict]:
-        return [{"role": m.role, "content": m.content} for m in messages]
+    def _to_anthropic_messages(
+        self, messages: list[AdapterMessage]
+    ) -> tuple[list[dict], str | None]:
+        """Convert messages to Anthropic format, extracting system messages.
+
+        Returns (messages, system_prompt). System messages from the message list
+        take priority over the configured system_prompt.
+        """
+        system_parts: list[str] = []
+        chat_messages: list[dict] = []
+        for m in messages:
+            if m.role == "system":
+                system_parts.append(m.content)
+            else:
+                chat_messages.append({"role": m.role, "content": m.content})
+
+        # Inline system messages override config-level system_prompt
+        system_prompt = "\n\n".join(system_parts) if system_parts else self._system_prompt
+        return chat_messages, system_prompt or None
 
     async def _send_anthropic(self, messages: list[AdapterMessage]) -> AdapterResponse:
         if not self._anthropic_client:
             raise RuntimeError("Anthropic client not initialized. Call connect() first.")
+        chat_messages, system_prompt = self._to_anthropic_messages(messages)
         kwargs: dict = {
             "model": self._model,
             "max_tokens": 4096,
-            "messages": self._to_anthropic_messages(messages),
+            "messages": chat_messages,
         }
-        if self._system_prompt:
-            kwargs["system"] = self._system_prompt
+        if system_prompt:
+            kwargs["system"] = system_prompt
 
         response = await self._anthropic_client.messages.create(**kwargs)
         content = response.content[0].text if response.content else ""
@@ -102,13 +120,14 @@ class ApiAdapter(BaseAdapter):
     async def _stream_anthropic(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         if not self._anthropic_client:
             raise RuntimeError("Anthropic client not initialized. Call connect() first.")
+        chat_messages, system_prompt = self._to_anthropic_messages(messages)
         kwargs: dict = {
             "model": self._model,
             "max_tokens": 4096,
-            "messages": self._to_anthropic_messages(messages),
+            "messages": chat_messages,
         }
-        if self._system_prompt:
-            kwargs["system"] = self._system_prompt
+        if system_prompt:
+            kwargs["system"] = system_prompt
 
         # Use raw event stream to capture both thinking and text blocks
         async with self._anthropic_client.messages.stream(**kwargs) as stream:
@@ -123,7 +142,9 @@ class ApiAdapter(BaseAdapter):
 
     def _to_openai_messages(self, messages: list[AdapterMessage]) -> list[dict]:
         msgs: list[dict] = []
-        if self._system_prompt:
+        # Check if messages already contain a system message
+        has_inline_system = any(m.role == "system" for m in messages)
+        if not has_inline_system and self._system_prompt:
             msgs.append({"role": "system", "content": self._system_prompt})
         for m in messages:
             msgs.append({"role": m.role, "content": m.content})

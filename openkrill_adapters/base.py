@@ -33,7 +33,7 @@ class AdapterCapability(IntEnum):
 class AdapterMessage:
     """Normalized message format across all adapters."""
 
-    role: str  # "user" or "assistant"
+    role: str  # "user", "assistant", or "system"
     content: str
     content_type: str = "text"  # "text", "markdown", "image", "file"
     metadata: dict = field(default_factory=dict)

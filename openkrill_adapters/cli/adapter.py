@@ -54,8 +54,7 @@ class CliAdapter(BaseAdapter):
             raise RuntimeError("No bridge connected")
 
         msg_dicts = [
-            {"role": m.role, "content": m.content, "content_type": m.content_type}
-            for m in messages
+            {"role": m.role, "content": m.content, "content_type": m.content_type} for m in messages
         ]
 
         result = await self._bridge_send(self._agent_id, msg_dicts)
