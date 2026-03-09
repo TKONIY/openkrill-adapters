@@ -22,8 +22,8 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import subprocess
-import sys
 
 import websockets
 
@@ -56,9 +56,9 @@ async def handle_request(
 
     prompt = user_messages[-1].get("content", "")
 
-    # Build command
-    cmd_parts = [command] + args.split() + [prompt]
-    logger.info("Running: %s", " ".join(cmd_parts[:3]) + " ...")
+    # Build command — use "--" to prevent prompt being parsed as flags
+    cmd_parts = [command] + args.split() + ["--", prompt]
+    logger.info("Running: %s ...", command)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -174,12 +174,19 @@ async def run_bridge(
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenKrill Bridge Daemon")
     parser.add_argument("--server", required=True, help="WebSocket URL (ws://host:port/ws/bridge)")
-    parser.add_argument("--token", required=True, help="JWT auth token")
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("OPENKRILL_BRIDGE_TOKEN", ""),
+        help="JWT auth token (or set OPENKRILL_BRIDGE_TOKEN env var)",
+    )
     parser.add_argument("--agent-id", required=True, help="Agent UUID to serve")
     parser.add_argument("--command", default="claude", help="CLI command (default: claude)")
     parser.add_argument("--args", default="-p", help="CLI args (default: -p)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    if not args.token:
+        parser.error("--token is required (or set OPENKRILL_BRIDGE_TOKEN env var)")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
