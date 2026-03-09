@@ -180,12 +180,21 @@ class ApiAdapter(BaseAdapter):
     async def _stream_openai(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         if not self._openai_client:
             raise RuntimeError("OpenAI client not initialized. Call connect() first.")
-        stream = await self._openai_client.chat.completions.create(
-            model=self._model,
-            messages=self._to_openai_messages(messages),
-            stream=True,
-            stream_options={"include_usage": True},
-        )
+        openai_msgs = self._to_openai_messages(messages)
+        try:
+            stream = await self._openai_client.chat.completions.create(
+                model=self._model,
+                messages=openai_msgs,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+        except Exception:
+            # Retry without stream_options for proxies that don't support it
+            stream = await self._openai_client.chat.completions.create(
+                model=self._model,
+                messages=openai_msgs,
+                stream=True,
+            )
         async for chunk in stream:
             # Final chunk with usage info (no choices)
             if hasattr(chunk, "usage") and chunk.usage and not chunk.choices:
