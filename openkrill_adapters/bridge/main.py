@@ -27,6 +27,8 @@ import subprocess
 
 import websockets
 
+from openkrill_adapters.bridge.session_manager import SessionManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -117,14 +119,140 @@ async def handle_request(
         )
 
 
+async def handle_session_send(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    session_manager: SessionManager,
+) -> None:
+    """Handle a session send request — stream Claude Code output back."""
+    request_id = data.get("request_id", "")
+    agent_id = data.get("agent_id", "")
+    prompt = data.get("prompt", "")
+    messages = data.get("messages", [])
+
+    # Support both direct prompt and messages-based input
+    if not prompt and messages:
+        user_messages = [m for m in messages if m.get("role") == "user"]
+        if user_messages:
+            prompt = user_messages[-1].get("content", "")
+
+    if not prompt:
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.error",
+                    "request_id": request_id,
+                    "error": "No prompt provided",
+                }
+            )
+        )
+        return
+
+    try:
+        async for event in session_manager.send_message(agent_id, prompt):
+            event_type = event.get("type", "")
+
+            if event_type == "error":
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "bridge.error",
+                            "request_id": request_id,
+                            "error": event.get("error", "Unknown error"),
+                        }
+                    )
+                )
+                return
+
+            if event_type == "content_block_delta":
+                delta = event.get("delta", {})
+                delta_type = delta.get("type", "")
+
+                if delta_type == "text_delta":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "bridge.stream",
+                                "request_id": request_id,
+                                "chunk_type": "text",
+                                "content": delta.get("text", ""),
+                            }
+                        )
+                    )
+                elif delta_type == "thinking_delta":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "bridge.stream",
+                                "request_id": request_id,
+                                "chunk_type": "thinking",
+                                "content": delta.get("thinking", ""),
+                            }
+                        )
+                    )
+
+        # Stream complete
+        session_id = session_manager.get_session_id(agent_id)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.stream.end",
+                    "request_id": request_id,
+                    "session_id": session_id or "",
+                }
+            )
+        )
+        logger.info("Session stream complete for request %s", request_id)
+
+    except Exception as e:
+        logger.exception("Error in session send for request %s", request_id)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.error",
+                    "request_id": request_id,
+                    "error": str(e),
+                }
+            )
+        )
+
+
+async def handle_session_interrupt(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    session_manager: SessionManager,
+) -> None:
+    """Handle a session interrupt request."""
+    request_id = data.get("request_id", "")
+    agent_id = data.get("agent_id", "")
+
+    interrupted = await session_manager.interrupt(agent_id)
+    await ws.send(
+        json.dumps(
+            {
+                "type": "bridge.session.interrupted",
+                "request_id": request_id,
+                "interrupted": interrupted,
+            }
+        )
+    )
+    logger.info("Session interrupt for agent %s: %s", agent_id, interrupted)
+
+
 async def run_bridge(
     server_url: str,
     token: str,
     agent_id: str,
     command: str,
     args: str,
+    session_mode: bool = False,
 ) -> None:
     """Main bridge loop — connect, authenticate, handle requests."""
+    session_manager: SessionManager | None = None
+    if session_mode:
+        session_manager = SessionManager(command=command)
+        logger.info("Session mode enabled")
+
     while True:
         try:
             logger.info("Connecting to %s ...", server_url)
@@ -159,6 +287,14 @@ async def run_bridge(
                             asyncio.create_task(
                                 handle_request(ws, data, command, args)
                             )
+                        elif msg_type == "bridge.session.send" and session_manager:
+                            asyncio.create_task(
+                                handle_session_send(ws, data, session_manager)
+                            )
+                        elif msg_type == "bridge.session.interrupt" and session_manager:
+                            asyncio.create_task(
+                                handle_session_interrupt(ws, data, session_manager)
+                            )
                         elif msg_type == "pong":
                             pass
                         else:
@@ -182,6 +318,7 @@ def main() -> None:
     parser.add_argument("--agent-id", required=True, help="Agent UUID to serve")
     parser.add_argument("--command", default="claude", help="CLI command (default: claude)")
     parser.add_argument("--args", default="-p", help="CLI args, use = syntax for dash args: --args=\"-p\" (default: -p)")
+    parser.add_argument("--session-mode", action="store_true", help="Enable session management and streaming")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -200,6 +337,7 @@ def main() -> None:
             agent_id=args.agent_id,
             command=args.command,
             args=args.args,
+            session_mode=args.session_mode,
         )
     )
 
