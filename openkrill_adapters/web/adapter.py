@@ -20,6 +20,7 @@ from openkrill_adapters.base import (
     AdapterMessage,
     AdapterResponse,
     BaseAdapter,
+    StreamChunk,
 )
 from openkrill_adapters.web.site_driver import SiteDriver, SiteDriverRegistry
 
@@ -152,10 +153,10 @@ class WebAdapter(BaseAdapter):
 
         return AdapterResponse(content=response_text, content_type="text")
 
-    async def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
+    async def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         """Web adapter doesn't support true streaming — returns full response as one chunk."""
         response = await self.send(messages)
-        yield response.content
+        yield StreamChunk(type="text", content=response.content)
 
     async def health_check(self) -> bool:
         """Check if browser session is still alive and logged in."""

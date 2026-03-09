@@ -3,7 +3,13 @@
 Pluggable adapters for connecting AI sources and social media platforms.
 """
 
-from openkrill_adapters.base import AdapterCapability, AdapterMessage, AdapterResponse, BaseAdapter
+from openkrill_adapters.base import (
+    AdapterCapability,
+    AdapterMessage,
+    AdapterResponse,
+    BaseAdapter,
+    StreamChunk,
+)
 from openkrill_adapters.registry import AdapterRegistry
 
 __all__ = [
@@ -12,4 +18,5 @@ __all__ = [
     "AdapterResponse",
     "AdapterRegistry",
     "BaseAdapter",
+    "StreamChunk",
 ]

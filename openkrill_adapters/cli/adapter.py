@@ -15,7 +15,13 @@ import logging
 from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any
 
-from openkrill_adapters.base import AdapterCapability, AdapterMessage, AdapterResponse, BaseAdapter
+from openkrill_adapters.base import (
+    AdapterCapability,
+    AdapterMessage,
+    AdapterResponse,
+    BaseAdapter,
+    StreamChunk,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +64,10 @@ class CliAdapter(BaseAdapter):
             content_type=result.get("content_type", "text"),
         )
 
-    async def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
-        # For now, CLI adapter uses non-streaming (full response)
+    async def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
+        # For now, CLI adapter uses non-streaming (full response as single chunk)
         response = await self.send(messages)
-        yield response.content
+        yield StreamChunk(type="text", content=response.content)
 
     async def health_check(self) -> bool:
         return self._bridge_send is not None

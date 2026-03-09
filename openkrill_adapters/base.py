@@ -48,6 +48,17 @@ class AdapterResponse:
     metadata: dict = field(default_factory=dict)
 
 
+@dataclass
+class StreamChunk:
+    """A single chunk in a streaming response.
+
+    type: "thinking" for CoT/reasoning tokens, "text" for final response.
+    """
+
+    type: str  # "thinking" or "text"
+    content: str
+
+
 class BaseAdapter(ABC):
     """Unified interface for all adapter types.
 
@@ -75,11 +86,11 @@ class BaseAdapter(ABC):
         """Send messages and get a complete response."""
 
     @abstractmethod
-    def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
+    def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         """Send messages and get a streaming response.
 
         Yields:
-            str: Each chunk of the response as it arrives.
+            StreamChunk: Each chunk with type ("thinking" or "text") and content.
         """
 
     @abstractmethod

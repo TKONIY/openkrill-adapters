@@ -9,7 +9,13 @@ from collections.abc import AsyncIterator
 import anthropic
 import openai
 
-from openkrill_adapters.base import AdapterCapability, AdapterMessage, AdapterResponse, BaseAdapter
+from openkrill_adapters.base import (
+    AdapterCapability,
+    AdapterMessage,
+    AdapterResponse,
+    BaseAdapter,
+    StreamChunk,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +55,7 @@ class ApiAdapter(BaseAdapter):
             return await self._send_anthropic(messages)
         return await self._send_openai(messages)
 
-    async def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
+    async def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         if self._provider == "anthropic":
             async for chunk in self._stream_anthropic(messages):
                 yield chunk
@@ -93,7 +99,7 @@ class ApiAdapter(BaseAdapter):
         content = response.content[0].text if response.content else ""
         return AdapterResponse(content=content, content_type="markdown")
 
-    async def _stream_anthropic(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
+    async def _stream_anthropic(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         if not self._anthropic_client:
             raise RuntimeError("Anthropic client not initialized. Call connect() first.")
         kwargs: dict = {
@@ -104,9 +110,14 @@ class ApiAdapter(BaseAdapter):
         if self._system_prompt:
             kwargs["system"] = self._system_prompt
 
+        # Use raw event stream to capture both thinking and text blocks
         async with self._anthropic_client.messages.stream(**kwargs) as stream:
-            async for text in stream.text_stream:
-                yield text
+            async for event in stream:
+                if event.type == "content_block_delta":
+                    if event.delta.type == "thinking_delta":
+                        yield StreamChunk(type="thinking", content=event.delta.thinking)
+                    elif event.delta.type == "text_delta":
+                        yield StreamChunk(type="text", content=event.delta.text)
 
     # ── OpenAI ──
 
@@ -128,7 +139,7 @@ class ApiAdapter(BaseAdapter):
         content = response.choices[0].message.content or ""
         return AdapterResponse(content=content, content_type="markdown")
 
-    async def _stream_openai(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
+    async def _stream_openai(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         if not self._openai_client:
             raise RuntimeError("OpenAI client not initialized. Call connect() first.")
         stream = await self._openai_client.chat.completions.create(
@@ -137,5 +148,12 @@ class ApiAdapter(BaseAdapter):
             stream=True,
         )
         async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            # OpenAI reasoning models (o1/o3) may include reasoning content
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                yield StreamChunk(type="thinking", content=reasoning)
+            if delta.content:
+                yield StreamChunk(type="text", content=delta.content)
