@@ -1,0 +1,141 @@
+"""API Adapter — direct SDK calls to AI providers.
+
+Supports: Anthropic, OpenAI, and any OpenAI-compatible API (e.g., packyapi).
+"""
+
+import logging
+from collections.abc import AsyncIterator
+
+import anthropic
+import openai
+
+from openkrill_adapters.base import AdapterCapability, AdapterMessage, AdapterResponse, BaseAdapter
+
+logger = logging.getLogger(__name__)
+
+
+class ApiAdapter(BaseAdapter):
+    """Adapter for direct API calls to AI providers."""
+
+    def __init__(self, config: dict) -> None:
+        super().__init__(config)
+        self._provider = config.get("provider", "openai")
+        self._model = config.get("model", "")
+        self._api_key = config.get("api_key", "")
+        self._base_url = config.get("base_url")
+        self._system_prompt = config.get("system_prompt", "")
+        self._anthropic_client: anthropic.AsyncAnthropic | None = None
+        self._openai_client: openai.AsyncOpenAI | None = None
+
+    async def connect(self) -> None:
+        if self._provider == "anthropic":
+            self._anthropic_client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        else:
+            kwargs: dict = {"api_key": self._api_key}
+            if self._base_url:
+                kwargs["base_url"] = self._base_url
+            self._openai_client = openai.AsyncOpenAI(**kwargs)
+
+    async def disconnect(self) -> None:
+        if self._anthropic_client:
+            await self._anthropic_client.close()
+            self._anthropic_client = None
+        if self._openai_client:
+            await self._openai_client.close()
+            self._openai_client = None
+
+    async def send(self, messages: list[AdapterMessage]) -> AdapterResponse:
+        if self._provider == "anthropic":
+            return await self._send_anthropic(messages)
+        return await self._send_openai(messages)
+
+    async def send_stream(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
+        if self._provider == "anthropic":
+            async for chunk in self._stream_anthropic(messages):
+                yield chunk
+        else:
+            async for chunk in self._stream_openai(messages):
+                yield chunk
+
+    async def health_check(self) -> bool:
+        try:
+            if self._provider == "anthropic":
+                return self._anthropic_client is not None
+            return self._openai_client is not None
+        except Exception:
+            return False
+
+    @property
+    def adapter_type(self) -> str:
+        return "api"
+
+    @property
+    def max_capability(self) -> AdapterCapability:
+        return AdapterCapability.L1_RICH
+
+    # ── Anthropic ──
+
+    def _to_anthropic_messages(self, messages: list[AdapterMessage]) -> list[dict]:
+        return [{"role": m.role, "content": m.content} for m in messages]
+
+    async def _send_anthropic(self, messages: list[AdapterMessage]) -> AdapterResponse:
+        if not self._anthropic_client:
+            raise RuntimeError("Anthropic client not initialized. Call connect() first.")
+        kwargs: dict = {
+            "model": self._model,
+            "max_tokens": 4096,
+            "messages": self._to_anthropic_messages(messages),
+        }
+        if self._system_prompt:
+            kwargs["system"] = self._system_prompt
+
+        response = await self._anthropic_client.messages.create(**kwargs)
+        content = response.content[0].text if response.content else ""
+        return AdapterResponse(content=content, content_type="markdown")
+
+    async def _stream_anthropic(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
+        if not self._anthropic_client:
+            raise RuntimeError("Anthropic client not initialized. Call connect() first.")
+        kwargs: dict = {
+            "model": self._model,
+            "max_tokens": 4096,
+            "messages": self._to_anthropic_messages(messages),
+        }
+        if self._system_prompt:
+            kwargs["system"] = self._system_prompt
+
+        async with self._anthropic_client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                yield text
+
+    # ── OpenAI ──
+
+    def _to_openai_messages(self, messages: list[AdapterMessage]) -> list[dict]:
+        msgs: list[dict] = []
+        if self._system_prompt:
+            msgs.append({"role": "system", "content": self._system_prompt})
+        for m in messages:
+            msgs.append({"role": m.role, "content": m.content})
+        return msgs
+
+    async def _send_openai(self, messages: list[AdapterMessage]) -> AdapterResponse:
+        if not self._openai_client:
+            raise RuntimeError("OpenAI client not initialized. Call connect() first.")
+        response = await self._openai_client.chat.completions.create(
+            model=self._model,
+            messages=self._to_openai_messages(messages),
+        )
+        content = response.choices[0].message.content or ""
+        return AdapterResponse(content=content, content_type="markdown")
+
+    async def _stream_openai(self, messages: list[AdapterMessage]) -> AsyncIterator[str]:
+        if not self._openai_client:
+            raise RuntimeError("OpenAI client not initialized. Call connect() first.")
+        stream = await self._openai_client.chat.completions.create(
+            model=self._model,
+            messages=self._to_openai_messages(messages),
+            stream=True,
+        )
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
