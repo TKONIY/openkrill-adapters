@@ -20,10 +20,24 @@ class SessionProcess:
 class SessionManager:
     """Manages Claude Code sessions -- create, send, interrupt."""
 
-    def __init__(self, command: str = "claude"):
+    def __init__(
+        self,
+        command: str = "claude",
+        initial_session_id: str | None = None,
+        agent_id: str | None = None,
+    ):
         self._command = command
         self._sessions: dict[str, str] = {}  # agent_session_key -> claude_session_id
         self._active_procs: dict[str, asyncio.subprocess.Process] = {}  # session_id -> running proc
+
+        # Pre-populate with an existing session (e.g. user's local Claude Code session)
+        if initial_session_id and agent_id:
+            self._sessions[agent_id] = initial_session_id
+            logger.info(
+                "Pre-loaded session %s for agent %s",
+                initial_session_id[:8],
+                agent_id[:8],
+            )
 
     def get_or_create_session_id(self, agent_id: str) -> tuple[str, bool]:
         """Get existing session_id or create a new one. Returns (session_id, is_new)."""

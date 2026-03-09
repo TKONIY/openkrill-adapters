@@ -286,12 +286,20 @@ async def run_bridge(
     command: str,
     args: str,
     session_mode: bool = False,
+    initial_session_id: str = "",
 ) -> None:
     """Main bridge loop — connect, authenticate, handle requests."""
     session_manager: SessionManager | None = None
     if session_mode:
-        session_manager = SessionManager(command=command)
-        logger.info("Session mode enabled")
+        session_manager = SessionManager(
+            command=command,
+            initial_session_id=initial_session_id or None,
+            agent_id=agent_id if initial_session_id else None,
+        )
+        if initial_session_id:
+            logger.info("Session mode enabled (resuming session %s)", initial_session_id[:8])
+        else:
+            logger.info("Session mode enabled")
 
     while True:
         try:
@@ -365,6 +373,11 @@ def main() -> None:
         action="store_true",
         help="Enable session management and streaming",
     )
+    parser.add_argument(
+        "--session-id",
+        default="",
+        help="Existing Claude Code session ID to resume (implies --session-mode)",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -376,6 +389,9 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    # --session-id implies --session-mode
+    session_mode = args.session_mode or bool(args.session_id)
+
     asyncio.run(
         run_bridge(
             server_url=args.server,
@@ -383,7 +399,8 @@ def main() -> None:
             agent_id=args.agent_id,
             command=args.command,
             args=args.args,
-            session_mode=args.session_mode,
+            session_mode=session_mode,
+            initial_session_id=args.session_id,
         )
     )
 
