@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import uuid
 
@@ -56,7 +57,7 @@ class SessionManager:
         session_id, is_new = self.get_or_create_session_id(agent_id)
 
         # Build command
-        cmd = [self._command, "-p", "--output-format", "stream-json"]
+        cmd = [self._command, "-p", "--verbose", "--output-format", "stream-json"]
         if is_new:
             cmd.extend(["--session-id", session_id])
         else:
@@ -70,11 +71,14 @@ class SessionManager:
             "new" if is_new else "resume",
         )
 
+        # Build a clean env — remove CLAUDECODE to avoid nested-session detection
+        clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=None,  # inherit env
+            env=clean_env,
         )
         self._active_procs[session_id] = proc
 
