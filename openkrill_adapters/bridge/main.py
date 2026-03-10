@@ -990,7 +990,7 @@ async def handle_session_send(
                             )
                         )
 
-            # Claude Code "result" event with tool_results
+            # Claude Code "result" event with tool_results and usage
             elif event_type == "result":
                 tool_results = event.get("tool_results", [])
                 for tr in tool_results:
@@ -1006,6 +1006,24 @@ async def handle_session_send(
                                     "tool_name": tr.get("name", ""),
                                     "result": tr.get("content", ""),
                                     "is_error": tr.get("is_error", False),
+                                },
+                            }
+                        )
+                    )
+                # Extract usage from result event
+                result_usage = event.get("usage", {})
+                if result_usage:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "bridge.stream",
+                                "request_id": request_id,
+                                "chunk_type": "usage",
+                                "content": "",
+                                "metadata": {
+                                    "input_tokens": result_usage.get("input_tokens", 0),
+                                    "output_tokens": result_usage.get("output_tokens", 0),
+                                    "model": event.get("model", ""),
                                 },
                             }
                         )

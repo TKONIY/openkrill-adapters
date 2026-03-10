@@ -22,6 +22,7 @@ from openkrill_adapters.base import (
     AdapterResponse,
     BaseAdapter,
     StreamChunk,
+    UsageInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,17 @@ class SessionCliAdapter(BaseAdapter):
                 chunk_type = item.get("chunk_type", "text")
                 content = item.get("content", "")
                 metadata = item.get("metadata", {})
-                if chunk_type in ("tool_use", "tool_result"):
+                if chunk_type == "usage":
+                    yield StreamChunk(
+                        type="usage",
+                        usage=UsageInfo(
+                            input_tokens=metadata.get("input_tokens", 0),
+                            output_tokens=metadata.get("output_tokens", 0),
+                            model=metadata.get("model", ""),
+                            provider="anthropic",
+                        ),
+                    )
+                elif chunk_type in ("tool_use", "tool_result"):
                     # Tool events always forwarded (content may be empty)
                     yield StreamChunk(type=chunk_type, content=content, metadata=metadata)
                 elif content:
