@@ -18,6 +18,8 @@ Protocol:
     5. Send response: {"type": "bridge.response", "request_id": "...", "content": "..."}
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
@@ -29,7 +31,776 @@ import websockets
 
 from openkrill_adapters.bridge.session_manager import SessionManager
 
+# ---------------------------------------------------------------------------
+# Constants for file system / git handlers
+# ---------------------------------------------------------------------------
+
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", ".mypy_cache", ".ruff_cache"}
+
+_MAX_FILE_SIZE = 1 * 1024 * 1024  # 1 MB
+
+_MAX_DEPTH = 5
+
+_LANG_MAP: dict[str, str] = {
+    ".py": "python",
+    ".pyi": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".json": "json",
+    ".md": "markdown",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".less": "less",
+    ".rs": "rust",
+    ".go": "go",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".sh": "shell",
+    ".bash": "shell",
+    ".zsh": "shell",
+    ".fish": "shell",
+    ".sql": "sql",
+    ".graphql": "graphql",
+    ".xml": "xml",
+    ".toml": "toml",
+    ".ini": "ini",
+    ".cfg": "ini",
+    ".env": "dotenv",
+    ".dockerfile": "dockerfile",
+    ".tf": "hcl",
+    ".lua": "lua",
+    ".r": "r",
+    ".R": "r",
+    ".vue": "vue",
+    ".svelte": "svelte",
+}
+
+_BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp",
+    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".exe", ".dll", ".so", ".dylib", ".o", ".a",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".pyc", ".pyo", ".class", ".jar",
+    ".bin", ".dat", ".db", ".sqlite",
+}  # fmt: skip
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_path(requested: str, working_dir: str) -> str | None:
+    """Resolve *requested* under *working_dir* and return the real path.
+
+    Returns ``None`` if the resolved path escapes the working directory.
+    """
+    if os.path.isabs(requested):
+        resolved = os.path.realpath(requested)
+    else:
+        resolved = os.path.realpath(os.path.join(working_dir, requested))
+    wd_real = os.path.realpath(working_dir)
+    if not (resolved == wd_real or resolved.startswith(wd_real + os.sep)):
+        return None
+    return resolved
+
+
+def _is_binary(path: str) -> bool:
+    _, ext = os.path.splitext(path)
+    return ext.lower() in _BINARY_EXTENSIONS
+
+
+def _detect_language(path: str) -> str:
+    _, ext = os.path.splitext(path)
+    if ext.lower() in _LANG_MAP:
+        return _LANG_MAP[ext.lower()]
+    name = os.path.basename(path).lower()
+    if name == "dockerfile":
+        return "dockerfile"
+    if name == "makefile":
+        return "makefile"
+    return "text"
+
+
+async def _run_cmd(cmd: list[str], cwd: str, timeout: float = 10) -> tuple[int, str, str]:
+    """Run a command asynchronously and return (returncode, stdout, stderr)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return (
+            proc.returncode or 0,
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
+    except FileNotFoundError:
+        return (127, "", f"Command not found: {cmd[0]}")
+    except TimeoutError:
+        return (1, "", "Command timed out")
+
+
+# ---------------------------------------------------------------------------
+# File system handlers
+# ---------------------------------------------------------------------------
+
+
+async def _git_tracked_files(working_dir: str) -> set[str] | None:
+    """Return the set of git-tracked + untracked-but-not-ignored files.
+
+    Returns None if *working_dir* is not a git repo.
+    """
+    rc1, tracked_out, _ = await _run_cmd(["git", "ls-files"], working_dir)
+    if rc1 != 0:
+        return None
+    rc2, untracked_out, _ = await _run_cmd(
+        ["git", "ls-files", "--others", "--exclude-standard"], working_dir
+    )
+    files: set[str] = set()
+    for line in tracked_out.splitlines():
+        if line.strip():
+            files.add(line.strip())
+    if rc2 == 0:
+        for line in untracked_out.splitlines():
+            if line.strip():
+                files.add(line.strip())
+    return files
+
+
+def _build_tree_os(
+    root: str,
+    current_depth: int,
+    max_depth: int,
+) -> list[dict]:
+    """Walk the filesystem, skipping ignored directories."""
+    nodes: list[dict] = []
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: (not e.is_dir(), e.name))
+    except PermissionError:
+        return nodes
+
+    for entry in entries:
+        if entry.name in _SKIP_DIRS:
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            children: list[dict] = []
+            if current_depth < max_depth:
+                children = _build_tree_os(entry.path, current_depth + 1, max_depth)
+            nodes.append(
+                {
+                    "name": entry.name,
+                    "type": "directory",
+                    "path": entry.path,
+                    "children": children,
+                }
+            )
+        elif entry.is_file(follow_symlinks=False):
+            node: dict = {
+                "name": entry.name,
+                "type": "file",
+                "path": entry.path,
+            }
+            if _is_binary(entry.path):
+                node["binary"] = True
+            nodes.append(node)
+    return nodes
+
+
+def _build_tree_from_git(
+    file_list: set[str],
+    working_dir: str,
+    base_rel: str,
+    max_depth: int,
+) -> list[dict]:
+    """Build a tree from a flat list of git-tracked relative paths."""
+    # Filter to only paths under base_rel
+    prefix = base_rel.rstrip("/") + "/" if base_rel and base_rel != "." else ""
+    relevant: list[str] = []
+    for f in file_list:
+        if prefix:
+            if f.startswith(prefix):
+                relevant.append(f[len(prefix) :])
+        else:
+            relevant.append(f)
+
+    # Build nested dict first
+    tree_dict: dict = {}
+    for rel in relevant:
+        parts = rel.split("/")
+        # Skip if exceeds max depth
+        if len(parts) > max_depth + 1:
+            # Still add parent dirs up to max_depth
+            parts = parts[: max_depth + 1]
+        node = tree_dict
+        for i, part in enumerate(parts):
+            if part not in node:
+                node[part] = {}
+            if i < len(parts) - 1:
+                node = node[part]
+
+    # Convert to list of nodes
+    base_path = os.path.join(working_dir, base_rel) if base_rel and base_rel != "." else working_dir
+
+    def _dict_to_nodes(d: dict, parent_path: str, depth: int) -> list[dict]:
+        nodes: list[dict] = []
+        for name in sorted(d.keys(), key=lambda n: (not bool(d[n]), n)):
+            full = os.path.join(parent_path, name)
+            children_dict = d[name]
+            if children_dict:
+                # It's a directory (has children)
+                children: list[dict] = []
+                if depth < max_depth:
+                    children = _dict_to_nodes(children_dict, full, depth + 1)
+                nodes.append(
+                    {
+                        "name": name,
+                        "type": "directory",
+                        "path": full,
+                        "children": children,
+                    }
+                )
+            else:
+                # Could be a file or an empty dir — check filesystem
+                node_item: dict = {
+                    "name": name,
+                    "type": "file",
+                    "path": full,
+                }
+                if _is_binary(full):
+                    node_item["binary"] = True
+                nodes.append(node_item)
+        return nodes
+
+    return _dict_to_nodes(tree_dict, base_path, 1)
+
+
+async def handle_files_list(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    working_dir: str,
+) -> None:
+    """Handle bridge.files.list — return a file tree."""
+    request_id = data.get("request_id", "")
+    req_path = data.get("path", ".")
+    depth = min(data.get("depth", 3), _MAX_DEPTH)
+
+    try:
+        resolved = _validate_path(req_path, working_dir)
+        if resolved is None:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.files.tree",
+                        "request_id": request_id,
+                        "error": "Path outside working directory",
+                    }
+                )
+            )
+            return
+
+        if not os.path.isdir(resolved):
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.files.tree",
+                        "request_id": request_id,
+                        "error": f"Not a directory: {req_path}",
+                    }
+                )
+            )
+            return
+
+        # Try git-based listing first
+        git_files = await _git_tracked_files(working_dir)
+        if git_files is not None:
+            wd_real = os.path.realpath(working_dir)
+            resolved_real = os.path.realpath(resolved)
+            base_rel = os.path.relpath(resolved_real, wd_real)
+            if base_rel == ".":
+                base_rel = ""
+            tree = _build_tree_from_git(git_files, wd_real, base_rel, depth)
+        else:
+            tree = _build_tree_os(resolved, 1, depth)
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.files.tree",
+                    "request_id": request_id,
+                    "tree": tree,
+                }
+            )
+        )
+        logger.info("Files tree sent (%d top-level entries)", len(tree))
+
+    except Exception as e:
+        logger.exception("Error in handle_files_list")
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.files.tree",
+                    "request_id": request_id,
+                    "error": str(e),
+                }
+            )
+        )
+
+
+async def handle_files_read(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    working_dir: str,
+) -> None:
+    """Handle bridge.files.read — return file content."""
+    request_id = data.get("request_id", "")
+    req_path = data.get("path", "")
+
+    try:
+        if not req_path:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.files.content",
+                        "request_id": request_id,
+                        "error": "No path specified",
+                    }
+                )
+            )
+            return
+
+        resolved = _validate_path(req_path, working_dir)
+        if resolved is None:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.files.content",
+                        "request_id": request_id,
+                        "error": "Path outside working directory",
+                    }
+                )
+            )
+            return
+
+        if not os.path.isfile(resolved):
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.files.content",
+                        "request_id": request_id,
+                        "error": f"File not found: {req_path}",
+                    }
+                )
+            )
+            return
+
+        file_size = os.path.getsize(resolved)
+        if file_size > _MAX_FILE_SIZE:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.files.content",
+                        "request_id": request_id,
+                        "path": resolved,
+                        "error": f"File too large ({file_size} bytes, max {_MAX_FILE_SIZE})",
+                    }
+                )
+            )
+            return
+
+        if _is_binary(resolved):
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.files.content",
+                        "request_id": request_id,
+                        "path": resolved,
+                        "binary": True,
+                        "size": file_size,
+                    }
+                )
+            )
+            return
+
+        # Read text file
+        try:
+            with open(resolved, encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError as e:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.files.content",
+                        "request_id": request_id,
+                        "path": resolved,
+                        "error": f"Cannot read file: {e}",
+                    }
+                )
+            )
+            return
+
+        language = _detect_language(resolved)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.files.content",
+                    "request_id": request_id,
+                    "path": resolved,
+                    "content": content,
+                    "language": language,
+                }
+            )
+        )
+        logger.info("File content sent: %s (%d chars)", resolved, len(content))
+
+    except Exception as e:
+        logger.exception("Error in handle_files_read")
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.files.content",
+                    "request_id": request_id,
+                    "error": str(e),
+                }
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Git handlers
+# ---------------------------------------------------------------------------
+
+
+async def handle_git_log(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    working_dir: str,
+) -> None:
+    """Handle bridge.git.log — return commit history."""
+    request_id = data.get("request_id", "")
+    limit = min(data.get("limit", 50), 500)
+
+    try:
+        rc, stdout, stderr = await _run_cmd(
+            [
+                "git",
+                "log",
+                "--format=%H%x00%h%x00%s%x00%an%x00%aI%x00%P%x00%D",
+                f"-n{limit}",
+            ],
+            working_dir,
+        )
+
+        if rc != 0:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.git.log.result",
+                        "request_id": request_id,
+                        "error": (
+                            "Not a git repository"
+                            if "not a git" in stderr.lower()
+                            else stderr.strip()
+                        ),
+                    }
+                )
+            )
+            return
+
+        commits = []
+        for line in stdout.strip().splitlines():
+            if not line:
+                continue
+            parts = line.split("\x00")
+            if len(parts) < 7:
+                continue
+            full_hash, short_hash, message, author, date, parents_str, refs_str = parts
+            parents = parents_str.split() if parents_str.strip() else []
+            refs = [r.strip() for r in refs_str.split(",") if r.strip()] if refs_str.strip() else []
+            commits.append(
+                {
+                    "hash": full_hash,
+                    "short_hash": short_hash,
+                    "message": message,
+                    "author": author,
+                    "date": date,
+                    "parents": parents,
+                    "refs": refs,
+                }
+            )
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.git.log.result",
+                    "request_id": request_id,
+                    "commits": commits,
+                }
+            )
+        )
+        logger.info("Git log sent (%d commits)", len(commits))
+
+    except Exception as e:
+        logger.exception("Error in handle_git_log")
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.git.log.result",
+                    "request_id": request_id,
+                    "error": str(e),
+                }
+            )
+        )
+
+
+def _parse_diff_output(diff_text: str, numstat_text: str) -> list[dict]:
+    """Parse unified diff output + numstat into per-file entries."""
+    # Parse numstat for additions/deletions
+    stats: dict[str, tuple[int, int]] = {}
+    for line in numstat_text.strip().splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            adds = int(parts[0]) if parts[0] != "-" else 0
+            dels = int(parts[1]) if parts[1] != "-" else 0
+            path = parts[2]
+            # Handle renames: "old => new" or "{old => new}/path"
+            if " => " in path:
+                path = path.split(" => ")[-1].rstrip("}")
+                if "{" in parts[2]:
+                    # e.g. src/{old.py => new.py}
+                    prefix = parts[2].split("{")[0]
+                    path = prefix + path
+            stats[path] = (adds, dels)
+
+    # Split diff into per-file chunks
+    files: list[dict] = []
+    current_diff_lines: list[str] = []
+    current_path = ""
+    current_status = "modified"
+
+    def _flush() -> None:
+        if current_path:
+            adds, dels = stats.get(current_path, (0, 0))
+            files.append(
+                {
+                    "path": current_path,
+                    "status": current_status,
+                    "additions": adds,
+                    "deletions": dels,
+                    "diff": "\n".join(current_diff_lines),
+                }
+            )
+
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            _flush()
+            current_diff_lines = [line]
+            # Extract path: diff --git a/path b/path
+            parts = line.split(" b/", 1)
+            current_path = parts[1] if len(parts) > 1 else ""
+            current_status = "modified"
+        elif line.startswith("new file mode"):
+            current_status = "added"
+            current_diff_lines.append(line)
+        elif line.startswith("deleted file mode"):
+            current_status = "deleted"
+            current_diff_lines.append(line)
+        elif line.startswith("rename from") or line.startswith("rename to"):
+            current_status = "renamed"
+            current_diff_lines.append(line)
+        else:
+            current_diff_lines.append(line)
+
+    _flush()
+    return files
+
+
+async def handle_git_diff(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    working_dir: str,
+) -> None:
+    """Handle bridge.git.diff — return diff information."""
+    request_id = data.get("request_id", "")
+    target = data.get("target", "uncommitted")
+    commit_hash = data.get("hash", "")
+    from_hash = data.get("from_hash", "")
+    to_hash = data.get("to_hash", "")
+
+    try:
+        if target == "uncommitted":
+            # Check if there are any commits
+            rc_check, _, _ = await _run_cmd(["git", "rev-parse", "HEAD"], working_dir)
+            if rc_check != 0:
+                diff_args = ["git", "diff"]
+                numstat_args = ["git", "diff", "--numstat"]
+            else:
+                diff_args = ["git", "diff", "HEAD"]
+                numstat_args = ["git", "diff", "HEAD", "--numstat"]
+        elif target == "commit":
+            if not commit_hash:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "bridge.git.diff.result",
+                            "request_id": request_id,
+                            "error": "No commit hash specified",
+                        }
+                    )
+                )
+                return
+            diff_args = ["git", "diff", f"{commit_hash}~1", commit_hash]
+            numstat_args = ["git", "diff", f"{commit_hash}~1", commit_hash, "--numstat"]
+        elif target == "range":
+            if not from_hash or not to_hash:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "bridge.git.diff.result",
+                            "request_id": request_id,
+                            "error": "from_hash and to_hash required for range diff",
+                        }
+                    )
+                )
+                return
+            diff_args = ["git", "diff", from_hash, to_hash]
+            numstat_args = ["git", "diff", from_hash, to_hash, "--numstat"]
+        else:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.git.diff.result",
+                        "request_id": request_id,
+                        "error": f"Unknown diff target: {target}",
+                    }
+                )
+            )
+            return
+
+        rc_diff, diff_out, diff_err = await _run_cmd(diff_args, working_dir, timeout=30)
+        rc_stat, stat_out, _ = await _run_cmd(numstat_args, working_dir, timeout=30)
+
+        if rc_diff != 0:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.git.diff.result",
+                        "request_id": request_id,
+                        "error": diff_err.strip() or "git diff failed",
+                    }
+                )
+            )
+            return
+
+        files = _parse_diff_output(diff_out, stat_out if rc_stat == 0 else "")
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.git.diff.result",
+                    "request_id": request_id,
+                    "files": files,
+                }
+            )
+        )
+        logger.info("Git diff sent (%d files)", len(files))
+
+    except Exception as e:
+        logger.exception("Error in handle_git_diff")
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.git.diff.result",
+                    "request_id": request_id,
+                    "error": str(e),
+                }
+            )
+        )
+
+
+async def handle_git_branches(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    working_dir: str,
+) -> None:
+    """Handle bridge.git.branches — return branch list."""
+    request_id = data.get("request_id", "")
+
+    try:
+        rc_cur, current_out, _ = await _run_cmd(["git", "branch", "--show-current"], working_dir)
+        rc_all, branches_out, stderr = await _run_cmd(
+            ["git", "branch", "-a", "--format=%(refname:short)"], working_dir
+        )
+
+        if rc_all != 0:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "bridge.git.branches.result",
+                        "request_id": request_id,
+                        "error": (
+                            "Not a git repository"
+                            if "not a git" in stderr.lower()
+                            else stderr.strip()
+                        ),
+                    }
+                )
+            )
+            return
+
+        current = current_out.strip() if rc_cur == 0 else ""
+        branches = [b.strip() for b in branches_out.strip().splitlines() if b.strip()]
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.git.branches.result",
+                    "request_id": request_id,
+                    "current": current,
+                    "branches": branches,
+                }
+            )
+        )
+        logger.info("Git branches sent (%d branches, current=%s)", len(branches), current)
+
+    except Exception as e:
+        logger.exception("Error in handle_git_branches")
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.git.branches.result",
+                    "request_id": request_id,
+                    "error": str(e),
+                }
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# CLI request handler
+# ---------------------------------------------------------------------------
 
 
 async def handle_request(
@@ -317,8 +1088,13 @@ async def run_bridge(
     args: str,
     session_mode: bool = False,
     initial_session_id: str = "",
+    working_dir: str = "",
 ) -> None:
     """Main bridge loop — connect, authenticate, handle requests."""
+    if not working_dir:
+        working_dir = os.getcwd()
+    working_dir = os.path.realpath(working_dir)
+
     session_manager: SessionManager | None = None
     if session_mode:
         session_manager = SessionManager(
@@ -371,6 +1147,18 @@ async def run_bridge(
                             asyncio.create_task(
                                 handle_session_query(ws, data, agent_id, session_manager)
                             )
+                        # File system protocol
+                        elif msg_type == "bridge.files.list":
+                            asyncio.create_task(handle_files_list(ws, data, working_dir))
+                        elif msg_type == "bridge.files.read":
+                            asyncio.create_task(handle_files_read(ws, data, working_dir))
+                        # Git protocol
+                        elif msg_type == "bridge.git.log":
+                            asyncio.create_task(handle_git_log(ws, data, working_dir))
+                        elif msg_type == "bridge.git.diff":
+                            asyncio.create_task(handle_git_diff(ws, data, working_dir))
+                        elif msg_type == "bridge.git.branches":
+                            asyncio.create_task(handle_git_branches(ws, data, working_dir))
                         elif msg_type == "pong":
                             pass
                         else:
