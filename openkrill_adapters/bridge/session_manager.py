@@ -4,18 +4,10 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
+import pty
 import uuid
 
 logger = logging.getLogger(__name__)
-
-
-class SessionProcess:
-    """Tracks a running Claude Code process for a session."""
-
-    def __init__(self, session_id: str, proc: asyncio.subprocess.Process):
-        self.session_id = session_id
-        self.proc = proc
 
 
 class SessionManager:
@@ -53,6 +45,9 @@ class SessionManager:
 
         Async generator that yields parsed JSON events from Claude Code's
         stream-json output.
+
+        Claude Code requires a TTY to produce output in --print mode, so we
+        use a pseudo-terminal (PTY) to run the subprocess.
         """
         session_id, is_new = self.get_or_create_session_id(agent_id)
 
@@ -71,36 +66,81 @@ class SessionManager:
             "new" if is_new else "resume",
         )
 
-        # Build a clean env — remove CLAUDECODE to avoid nested-session detection
-        clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        # Build a clean env — remove all Claude Code env vars to avoid nested-session detection
+        # Claude CLI checks CLAUDECODE and CLAUDE_CODE_ENTRYPOINT
+        _claude_env_keys = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
+        clean_env = {k: v for k, v in os.environ.items() if k not in _claude_env_keys}
+
+        # Use a PTY because Claude Code requires a TTY to produce output.
+        # We create a master/slave PTY pair. The subprocess writes to the slave
+        # (which looks like a terminal), and we read from the master fd.
+        master_fd, slave_fd = pty.openpty()
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=slave_fd,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=slave_fd,
             env=clean_env,
         )
+        # Close slave fd in parent — the child process has it
+        os.close(slave_fd)
+
         self._active_procs[session_id] = proc
 
         try:
-            # Read stdout line by line (stream-json is newline-delimited JSON)
-            while proc.stdout:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=300)
-                if not line:
-                    break
-                line_str = line.decode("utf-8", errors="replace").strip()
-                if not line_str:
-                    continue
+            loop = asyncio.get_event_loop()
+            buffer = b""
+
+            while True:
                 try:
-                    event = json.loads(line_str)
-                    yield event
-                except json.JSONDecodeError:
-                    logger.debug("Non-JSON line from claude: %s", line_str[:200])
+                    # Read from PTY master fd asynchronously
+                    chunk = await asyncio.wait_for(
+                        loop.run_in_executor(None, os.read, master_fd, 65536),
+                        timeout=300,
+                    )
+                except TimeoutError:
+                    proc.kill()
+                    yield {"type": "error", "error": "Session timed out (300s)"}
+                    return
+                except OSError:
+                    # PTY closed — process exited
+                    break
+
+                if not chunk:
+                    break
+
+                buffer += chunk
+
+                # Process complete lines
+                while b"\n" in buffer:
+                    line_bytes, buffer = buffer.split(b"\n", 1)
+                    line_str = line_bytes.decode("utf-8", errors="replace").strip()
+                    # Strip ANSI escape codes and carriage returns
+                    line_str = _strip_ansi(line_str)
+                    if not line_str:
+                        continue
+                    try:
+                        event = json.loads(line_str)
+                        yield event
+                    except json.JSONDecodeError:
+                        logger.debug("Non-JSON line from claude: %s", line_str[:200])
+
+            # Process any remaining buffer
+            if buffer:
+                line_str = buffer.decode("utf-8", errors="replace").strip()
+                line_str = _strip_ansi(line_str)
+                if line_str:
+                    try:
+                        event = json.loads(line_str)
+                        yield event
+                    except json.JSONDecodeError:
+                        logger.debug("Non-JSON trailing data: %s", line_str[:200])
 
             await proc.wait()
+            stderr_bytes = await proc.stderr.read() if proc.stderr else b""
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
             if proc.returncode != 0:
-                stderr_bytes = await proc.stderr.read() if proc.stderr else b""
-                stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
                 logger.error(
                     "Session %s exited with code %d: %s",
                     session_id[:8],
@@ -111,10 +151,14 @@ class SessionManager:
                     "type": "error",
                     "error": f"Claude exited with code {proc.returncode}: {stderr_text[:500]}",
                 }
-        except TimeoutError:
-            proc.kill()
-            yield {"type": "error", "error": "Session timed out (300s)"}
+            elif stderr_text:
+                logger.warning(
+                    "Session %s exited 0 but stderr: %s",
+                    session_id[:8],
+                    stderr_text[:500],
+                )
         finally:
+            os.close(master_fd)
             self._active_procs.pop(session_id, None)
 
     async def interrupt(self, agent_id: str) -> bool:
@@ -143,3 +187,15 @@ class SessionManager:
 
     def get_session_id(self, agent_id: str) -> str | None:
         return self._sessions.get(agent_id)
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences and carriage returns from text."""
+    import re
+
+    # Remove ANSI escape sequences
+    ansi_re = re.compile(r"\x1b\[[^a-zA-Z]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[\?]?[0-9;]*[a-zA-Z]")
+    text = ansi_re.sub("", text)
+    # Remove carriage returns
+    text = text.replace("\r", "")
+    return text.strip()

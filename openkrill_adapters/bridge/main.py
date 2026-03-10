@@ -174,7 +174,37 @@ async def handle_session_send(
                 )
                 return
 
-            if event_type == "content_block_delta":
+            # Claude Code stream-json format: "assistant" event with full message
+            if event_type == "assistant":
+                message = event.get("message", {})
+                content_blocks = message.get("content", [])
+                for block in content_blocks:
+                    block_type = block.get("type", "")
+                    if block_type == "text" and block.get("text"):
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "bridge.stream",
+                                    "request_id": request_id,
+                                    "chunk_type": "text",
+                                    "content": block["text"],
+                                }
+                            )
+                        )
+                    elif block_type == "thinking" and block.get("thinking"):
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "bridge.stream",
+                                    "request_id": request_id,
+                                    "chunk_type": "thinking",
+                                    "content": block["thinking"],
+                                }
+                            )
+                        )
+
+            # Anthropic API format (content_block_delta) — keep for compatibility
+            elif event_type == "content_block_delta":
                 delta = event.get("delta", {})
                 delta_type = delta.get("type", "")
 
