@@ -895,6 +895,100 @@ async def handle_request(
         )
 
 
+async def handle_command(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+    session_manager: SessionManager | None,
+    agent_id: str,
+) -> None:
+    """Handle bridge.command — send a slash command to the Claude Code session.
+
+    Slash commands (e.g. /compact, /model, /status) are sent to the CLI process
+    as regular input. The response is collected and returned as a single result.
+    """
+    request_id = data.get("request_id", "")
+    command = data.get("command", "")
+    args = data.get("args", "")
+
+    if not session_manager:
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.command.result",
+                    "request_id": request_id,
+                    "success": False,
+                    "error": "No session manager available (session mode not enabled)",
+                }
+            )
+        )
+        return
+
+    # Build the slash command string
+    cmd_str = f"/{command}"
+    if args:
+        cmd_str += f" {args}"
+
+    logger.info("Sending command to session: %s", cmd_str)
+
+    try:
+        output_parts: list[str] = []
+        async for event in session_manager.send_message(agent_id, cmd_str):
+            event_type = event.get("type", "")
+            if event_type == "error":
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "bridge.command.result",
+                            "request_id": request_id,
+                            "success": False,
+                            "error": event.get("error", "Command failed"),
+                        }
+                    )
+                )
+                return
+            if event_type == "assistant":
+                message = event.get("message", {})
+                for block in message.get("content", []):
+                    if block.get("type") == "text" and block.get("text"):
+                        output_parts.append(block["text"])
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.command.result",
+                    "request_id": request_id,
+                    "success": True,
+                    "output": "".join(output_parts),
+                    "command": command,
+                }
+            )
+        )
+        logger.info("Command /%s completed (%d chars output)", command, len("".join(output_parts)))
+
+    except TimeoutError:
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.command.result",
+                    "request_id": request_id,
+                    "success": False,
+                    "error": "Command timed out",
+                }
+            )
+        )
+    except Exception as e:
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "bridge.command.result",
+                    "request_id": request_id,
+                    "success": False,
+                    "error": str(e),
+                }
+            )
+        )
+
+
 async def handle_session_send(
     ws: websockets.WebSocketClientProtocol,
     data: dict,
@@ -1198,6 +1292,10 @@ async def run_bridge(
                             asyncio.create_task(handle_session_send(ws, data, session_manager))
                         elif msg_type == "bridge.session.interrupt" and session_manager:
                             asyncio.create_task(handle_session_interrupt(ws, data, session_manager))
+                        elif msg_type == "bridge.command":
+                            asyncio.create_task(
+                                handle_command(ws, data, session_manager, agent_id)
+                            )
                         elif msg_type == "bridge.session.query":
                             asyncio.create_task(
                                 handle_session_query(ws, data, agent_id, session_manager)
