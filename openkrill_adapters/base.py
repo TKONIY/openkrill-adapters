@@ -64,12 +64,14 @@ class StreamChunk:
     """A single chunk in a streaming response.
 
     type: "thinking" for CoT/reasoning tokens, "text" for final response,
+          "tool_use" for tool invocation, "tool_result" for tool output,
           "usage" for token usage info (yielded last).
     """
 
-    type: str  # "thinking", "text", or "usage"
+    type: str  # "thinking", "text", "tool_use", "tool_result", or "usage"
     content: str = ""
     usage: UsageInfo | None = None
+    metadata: dict = field(default_factory=dict)
 
 
 class BaseAdapter(ABC):

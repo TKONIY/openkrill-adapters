@@ -973,6 +973,43 @@ async def handle_session_send(
                                 }
                             )
                         )
+                    elif block_type == "tool_use":
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "bridge.stream",
+                                    "request_id": request_id,
+                                    "chunk_type": "tool_use",
+                                    "content": "",
+                                    "metadata": {
+                                        "tool_name": block.get("name", ""),
+                                        "tool_use_id": block.get("id", ""),
+                                        "tool_input": block.get("input", {}),
+                                    },
+                                }
+                            )
+                        )
+
+            # Claude Code "result" event with tool_results
+            elif event_type == "result":
+                tool_results = event.get("tool_results", [])
+                for tr in tool_results:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "bridge.stream",
+                                "request_id": request_id,
+                                "chunk_type": "tool_result",
+                                "content": "",
+                                "metadata": {
+                                    "tool_use_id": tr.get("tool_use_id", ""),
+                                    "tool_name": tr.get("name", ""),
+                                    "result": tr.get("content", ""),
+                                    "is_error": tr.get("is_error", False),
+                                },
+                            }
+                        )
+                    )
 
             # Anthropic API format (content_block_delta) — keep for compatibility
             elif event_type == "content_block_delta":

@@ -78,7 +78,11 @@ class SessionCliAdapter(BaseAdapter):
                     raise RuntimeError(item.get("error", "Bridge stream error"))
                 chunk_type = item.get("chunk_type", "text")
                 content = item.get("content", "")
-                if content:
+                metadata = item.get("metadata", {})
+                if chunk_type in ("tool_use", "tool_result"):
+                    # Tool events always forwarded (content may be empty)
+                    yield StreamChunk(type=chunk_type, content=content, metadata=metadata)
+                elif content:
                     yield StreamChunk(type=chunk_type, content=content)
 
     async def health_check(self) -> bool:
