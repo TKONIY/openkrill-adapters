@@ -13,13 +13,17 @@ dependencies = []
 api = ["anthropic>=0.40", "openai>=1.50"]
 cli = ["websockets>=13"]
 web = ["playwright>=1.40"]
-all = ["openkrill-adapters[api,cli,web]"]
+telegram = ["python-telegram-bot>=21"]
+discord = ["discord.py>=2.3"]
+all = ["openkrill-adapters[api,cli,web,telegram,discord]"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
 
 [project.entry-points."openkrill.adapters"]
 api = "openkrill_adapters.api:ApiAdapter"
 cli = "openkrill_adapters.cli:CliAdapter"
 web = "openkrill_adapters.web:WebAdapter"
+telegram = "openkrill_adapters.telegram:TelegramAdapter"
+discord = "openkrill_adapters.discord:DiscordAdapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openkrill_adapters"]

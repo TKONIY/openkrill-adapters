@@ -167,6 +167,17 @@ class ApiAdapter(BaseAdapter):
             msgs.append({"role": m.role, "content": m.content})
         return msgs
 
+    @staticmethod
+    def _strip_think_tags(text: str) -> tuple[str, str]:
+        """Extract <think>...</think> content from text, return (clean_text, thinking)."""
+        import re
+        thinking_parts: list[str] = []
+        def _replace(m: re.Match) -> str:
+            thinking_parts.append(m.group(1))
+            return ""
+        clean = re.sub(r"<think>(.*?)</think>", _replace, text, flags=re.DOTALL)
+        return clean.strip(), "\n".join(thinking_parts).strip()
+
     async def _send_openai(self, messages: list[AdapterMessage]) -> AdapterResponse:
         if not self._openai_client:
             raise RuntimeError("OpenAI client not initialized. Call connect() first.")
@@ -175,7 +186,8 @@ class ApiAdapter(BaseAdapter):
             messages=self._to_openai_messages(messages),
         )
         content = response.choices[0].message.content or ""
-        return AdapterResponse(content=content, content_type="markdown")
+        content, thinking = self._strip_think_tags(content)
+        return AdapterResponse(content=content, content_type="markdown", thinking=thinking or None)
 
     async def _stream_openai(self, messages: list[AdapterMessage]) -> AsyncIterator[StreamChunk]:
         if not self._openai_client:
@@ -195,6 +207,9 @@ class ApiAdapter(BaseAdapter):
                 messages=openai_msgs,
                 stream=True,
             )
+        # Track whether we're inside a <think> block (for DeepSeek-style inline thinking)
+        in_think_tag = False
+        buffer = ""
         async for chunk in stream:
             # Final chunk with usage info (no choices)
             if hasattr(chunk, "usage") and chunk.usage and not chunk.choices:
@@ -216,4 +231,47 @@ class ApiAdapter(BaseAdapter):
             if reasoning:
                 yield StreamChunk(type="thinking", content=reasoning)
             if delta.content:
-                yield StreamChunk(type="text", content=delta.content)
+                # Parse inline <think>...</think> tags (DeepSeek-style)
+                text = delta.content
+                buffer += text
+                while buffer:
+                    if in_think_tag:
+                        end_idx = buffer.find("</think>")
+                        if end_idx != -1:
+                            thinking_content = buffer[:end_idx]
+                            if thinking_content:
+                                yield StreamChunk(type="thinking", content=thinking_content)
+                            buffer = buffer[end_idx + 8:]  # skip </think>
+                            in_think_tag = False
+                        else:
+                            # Still inside think tag, yield as thinking
+                            yield StreamChunk(type="thinking", content=buffer)
+                            buffer = ""
+                    else:
+                        start_idx = buffer.find("<think>")
+                        if start_idx != -1:
+                            # Emit text before the tag
+                            if start_idx > 0:
+                                yield StreamChunk(type="text", content=buffer[:start_idx])
+                            buffer = buffer[start_idx + 7:]  # skip <think>
+                            in_think_tag = True
+                        else:
+                            # No <think> tag, but buffer might end with partial "<think"
+                            if "<" in buffer and not buffer.endswith(">"):
+                                # Could be partial tag, hold last part
+                                last_lt = buffer.rfind("<")
+                                partial = buffer[last_lt:]
+                                if "<think>".startswith(partial):
+                                    if last_lt > 0:
+                                        yield StreamChunk(type="text", content=buffer[:last_lt])
+                                    buffer = partial
+                                    break
+                                else:
+                                    yield StreamChunk(type="text", content=buffer)
+                                    buffer = ""
+                            else:
+                                yield StreamChunk(type="text", content=buffer)
+                                buffer = ""
+        # Flush remaining buffer
+        if buffer:
+            yield StreamChunk(type="thinking" if in_think_tag else "text", content=buffer)

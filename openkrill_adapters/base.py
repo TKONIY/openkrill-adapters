@@ -45,6 +45,7 @@ class AdapterResponse:
 
     content: str
     content_type: str = "text"
+    thinking: str | None = None
     metadata: dict = field(default_factory=dict)
 
 
